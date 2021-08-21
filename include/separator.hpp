@@ -28,6 +28,8 @@ public:
                   const Eigen::Matrix<double, 3, Eigen::Dynamic>& pointsA,
                   const Eigen::Matrix<double, 3, Eigen::Dynamic>& pointsB);
 
+  bool solveModel(const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsA,
+                           const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsB);
   long int getNumOfLPsRun();
 
   double meanSolveTimeMs();
