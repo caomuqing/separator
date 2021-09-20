@@ -245,7 +245,7 @@ bool Separator::solveModel(Eigen::Vector3d& solutionN, double& solutionD,
   return false;
 }
 
-bool Separator::solveModel(const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsA,
+bool Separator::solveModel(Eigen::Vector3d& solutionN, const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsA,
                            const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsB)
 {
   auto start_time = std::chrono::high_resolution_clock::now();
@@ -337,8 +337,9 @@ bool Separator::solveModel(const Eigen::Matrix<double, 2, Eigen::Dynamic>& point
 
   /* recover and display results */
   double z = glp_get_obj_val(pm_->lp);
-  // std::cout << "solutionD= " << solutionD << std::endl;
-  // printf("z = %g; n1 = %g; n2 = %g; n3 = %g\n", z, n1, n2, n3);
+  solutionN(0) = glp_get_col_prim(pm_->lp, 1);
+  solutionN(1) = glp_get_col_prim(pm_->lp, 2);
+  solutionN(2) = glp_get_col_prim(pm_->lp, 3);
 
   int status = glp_get_status(pm_->lp);
 
@@ -358,6 +359,237 @@ bool Separator::solveModel(const Eigen::Matrix<double, 2, Eigen::Dynamic>& point
   // std::cout << "total_time_us LP =" << total_time_us << "us" << std::endl;
   // std::cout << "mean comp time LP =" << pm_->mean_comp_time_ms * 1000 << "us" << std::endl;
   // std::cout << "pm_->num_of_LPs_run LP =" << pm_->num_of_LPs_run << std::endl;
+
+  // https://math.stackexchange.com/a/22351
+  pm_->mean_comp_time_ms =
+      pm_->mean_comp_time_ms + (total_time_us / 1e3 - pm_->mean_comp_time_ms) / pm_->num_of_LPs_run;
+
+  if ((status == GLP_OPT || status == GLP_FEAS))  //&& !degenerateSolution
+  {
+    return true;
+  }
+
+  return false;
+}
+
+bool Separator::solveModel(Eigen::Vector3d& solutionN, const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsA,
+                           const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsAPlus,
+                           const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsB)
+{
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  pm_->lp = glp_create_prob();
+  glp_set_prob_name(pm_->lp, "separator");
+  glp_set_obj_dir(pm_->lp, GLP_MAX);
+
+  /* fill problem */
+  glp_add_rows(pm_->lp, pointsA.cols() + pointsAPlus.cols() + pointsB.cols());
+  int row = 1;
+  double epsilon = 1.0;
+
+  for (int i = 0; i < pointsA.cols(); i++)
+  {
+    glp_set_row_bnds(pm_->lp, row, GLP_LO, epsilon, 0.0);  // n'xA+d>=epsilon
+    row++;
+  }
+
+  for (int i = 0; i < pointsAPlus.cols(); i++)
+  {
+    glp_set_row_bnds(pm_->lp, row, GLP_LO, epsilon, 0.0);  // n'xA+d>=epsilon
+    row++;
+  }
+
+
+  //  std::cout << "Using PointsB=" << std::endl;
+  for (int i = 0; i < pointsB.cols(); i++)
+  {
+    glp_set_row_bnds(pm_->lp, row, GLP_UP, 0.0, -epsilon);  //<=0.0   n'xB+d <=-epsilon
+    row++;
+  }
+
+  row++;
+
+  ///
+  glp_add_cols(pm_->lp, 3);
+
+  // weights
+  glp_set_col_name(pm_->lp, 1, "n1");
+  glp_set_col_bnds(pm_->lp, 1, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 1, pm_->weight_n0);    // weight on n0
+
+  glp_set_col_name(pm_->lp, 2, "n2");
+  glp_set_col_bnds(pm_->lp, 2, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 2, pm_->weight_n1);    // weight on n1
+
+  glp_set_col_name(pm_->lp, 3, "d");
+  glp_set_col_bnds(pm_->lp, 3, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 3, 0.0);               // weight on d
+
+  int r = 1;
+  row = 1;
+  for (int i = 0; i < pointsA.cols(); i++)
+  {
+    pm_->ia[r] = row, pm_->ja[r] = 1, pm_->ar[r] = pointsA(0, i); /* a[1,1] = 1 */
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 2, pm_->ar[r] = pointsA(1, i);  // a[1,2] = 2
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 3, pm_->ar[r] = 1.0;  // a[1,4] = 1
+    r++;
+    row++;
+  }
+
+  for (int i = 0; i < pointsAPlus.cols(); i++)
+  {
+    pm_->ia[r] = row, pm_->ja[r] = 1, pm_->ar[r] = pointsAPlus(0, i); /* a[1,1] = 1 */
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 2, pm_->ar[r] = pointsAPlus(1, i);  // a[1,2] = 2
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 3, pm_->ar[r] = 1.0;  // a[1,4] = 1
+    r++;
+    row++;
+  }
+
+  for (int i = 0; i < pointsB.cols(); i++)
+  {
+    pm_->ia[r] = row, pm_->ja[r] = 1, pm_->ar[r] = pointsB(0, i);  // a[1,1] = 1
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 2, pm_->ar[r] = pointsB(1, i);  // a[1,2] = 2
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 3, pm_->ar[r] = 1.0;  // a[1,4] = 2
+    r++;
+    row++;
+  }
+
+  glp_load_matrix(pm_->lp, r - 1, pm_->ia, pm_->ja,
+                  pm_->ar); 
+
+  /* solve problem */
+
+  glp_simplex(pm_->lp, &pm_->params);
+
+  /* recover and display results */
+  double z = glp_get_obj_val(pm_->lp);
+  solutionN(0) = glp_get_col_prim(pm_->lp, 1);
+  solutionN(1) = glp_get_col_prim(pm_->lp, 2);
+  solutionN(2) = glp_get_col_prim(pm_->lp, 3);
+
+  int status = glp_get_status(pm_->lp);
+
+  // std::cout << "status= " << status << std::endl;
+
+  glp_delete_prob(pm_->lp);
+  glp_free_env();
+
+  pm_->num_of_LPs_run++;  // Now pm_->num_of_LPs_run counts also the last LP run
+  double total_time_us =
+      (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start_time))
+          .count();
+
+  // https://math.stackexchange.com/a/22351
+  pm_->mean_comp_time_ms =
+      pm_->mean_comp_time_ms + (total_time_us / 1e3 - pm_->mean_comp_time_ms) / pm_->num_of_LPs_run;
+
+  if ((status == GLP_OPT || status == GLP_FEAS))  //&& !degenerateSolution
+  {
+    return true;
+  }
+
+  return false;
+}
+
+bool Separator::solveModel(const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsA,
+                           const Eigen::Matrix<double, 2, Eigen::Dynamic>& pointsB)
+{
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+
+  pm_->lp = glp_create_prob();
+  glp_set_prob_name(pm_->lp, "separator");
+  glp_set_obj_dir(pm_->lp, GLP_MAX);
+
+  /* fill problem */
+  glp_add_rows(pm_->lp, pointsA.cols() + pointsB.cols());
+  int row = 1;
+
+  double epsilon = 1.0;
+
+  // n (the solution) will point to the pointsA
+
+  for (int i = 0; i < pointsA.cols(); i++)
+  {
+    // glp_set_row_name(lp, r, "p");
+    glp_set_row_bnds(pm_->lp, row, GLP_LO, epsilon, 0.0);  // n'xA+d>=epsilon
+    row++;
+  }
+  //  std::cout << "Using PointsB=" << std::endl;
+  for (int i = 0; i < pointsB.cols(); i++)
+  {
+    // glp_set_row_name(lp, r, "p");
+    glp_set_row_bnds(pm_->lp, row, GLP_UP, 0.0, -epsilon);  //<=0.0   n'xB+d <=-epsilon
+    row++;
+  }
+
+  // glp_set_row_bnds(pm_->lp, row, GLP_UP, 0.0, 3.0);  // n1+n2+n3<=3 //To prevent unbounded solutions
+  row++;
+
+  ///
+  glp_add_cols(pm_->lp, 3);
+
+  // weights
+  glp_set_col_name(pm_->lp, 1, "n1");
+  glp_set_col_bnds(pm_->lp, 1, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 1, pm_->weight_n0);    // weight on n0
+
+  glp_set_col_name(pm_->lp, 2, "n2");
+  glp_set_col_bnds(pm_->lp, 2, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 2, pm_->weight_n1);    // weight on n1
+
+  glp_set_col_name(pm_->lp, 3, "d");
+  glp_set_col_bnds(pm_->lp, 3, GLP_FR, 0.0, 0.0);  // Free
+  glp_set_obj_coef(pm_->lp, 3, 0.0);               // weight on d
+
+  int r = 1;
+  row = 1;
+  for (int i = 0; i < pointsA.cols(); i++)
+  {
+    pm_->ia[r] = row, pm_->ja[r] = 1, pm_->ar[r] = pointsA(0, i); /* a[1,1] = 1 */
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 2, pm_->ar[r] = pointsA(1, i);  // a[1,2] = 2
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 3, pm_->ar[r] = 1.0;  // a[1,4] = 1
+    r++;
+    row++;
+  }
+
+  for (int i = 0; i < pointsB.cols(); i++)
+  {
+    pm_->ia[r] = row, pm_->ja[r] = 1, pm_->ar[r] = pointsB(0, i);  // a[1,1] = 1
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 2, pm_->ar[r] = pointsB(1, i);  // a[1,2] = 2
+    r++;
+    pm_->ia[r] = row, pm_->ja[r] = 3, pm_->ar[r] = 1.0;  // a[1,4] = 2
+    r++;
+    row++;
+  }
+
+  glp_load_matrix(pm_->lp, r - 1, pm_->ia, pm_->ja,
+                  pm_->ar);  
+
+  /* solve problem */
+
+  glp_simplex(pm_->lp, &pm_->params);
+
+  int status = glp_get_status(pm_->lp);
+
+  // std::cout << "status= " << status << std::endl;
+
+  glp_delete_prob(pm_->lp);
+  glp_free_env();
+
+  pm_->num_of_LPs_run++;  // Now pm_->num_of_LPs_run counts also the last LP run
+  double total_time_us =
+      (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start_time))
+          .count();
 
   // https://math.stackexchange.com/a/22351
   pm_->mean_comp_time_ms =
